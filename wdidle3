@@ -1,0 +1,82 @@
+#!/bin/sh
+
+if [ $(id -u) -gt 0 ]
+then
+	echo 'sudo で root に切り替えています…………'
+	sudo "$0" "$@"
+	exit
+fi
+
+fail()
+{
+	printf "%s: %s\n" "$(basename $0)" "$2" 1>&2
+	exit $1
+}
+
+if [ $# = 1 ]
+then
+	disk="$1"
+elif [ $# = 2 ]
+then
+	disk="$1"
+	time=$(printf "%02X" $((0 | "$2")) 2> /dev/null)
+	if [ "$?" != 0 ] || [ "$2" -lt 0 ] || [ "$2" -gt 255 ]
+	then
+		fail 1 "第二引数には 0 から 255 までの整数値を与えて下さい - (実際の値: \"$2\")"
+	fi
+else
+	cat <<-USAGE >&2
+		usage: $(basename $0) devname
+		       $(basename $0) devname timecode
+	USAGE
+
+	exit 1
+fi
+
+ cmd_enable_vsc="80 45 00 44 57 40 00 00 00 00 00 00"
+cmd_disable_vsc="80 44 00 44 57 40 00 00 00 00 00 00"
+   cmd_read_key="B0 D6 BE 4F C2 40 00 00 00 00 01 00"
+  cmd_write_key="B0 D6 BE 4F C2 40 00 00 00 00 01 00"
+       cmd_read="B0 D5 BF 4F C2 40 00 00 00 00 01 00"
+      cmd_write="B0 D6 BF 4F C2 40 00 00 00 00 01 00"
+       read_key="2A 00 01 00 02 00 0D 00 16 00 01"
+      write_key="2A 00 02 00 02 00 0D 00 16 00 01"
+
+#Device Model:     WDC WD80EAZZ-00BKLB0
+
+devmodel=$(camcontrol cmd "$disk" -v -a 'EC 00 00 00 00 00 00 00 00 00 01 00' '-i' '512' - | cut -b 55-92)
+
+if ! echo "$devmodel" | grep -E '^DW C' > /dev/null
+then
+	fail 1 "\"$1\" に対する操作が失敗したか、Western Digital 製ではありません (たぶん)。"
+fi
+
+# デバイスに対する VSC (Vendor Specific Commands) の有効化
+err=$(camcontrol cmd "$disk" -v -a "$cmd_enable_vsc" 2>&1)
+if [ "$?" != 0 ]
+then
+	fail 1 "\"$1\" に対する操作が失敗しました。"$'\012'"$err"
+fi
+
+# idle3 の確認
+camcontrol cmd "$disk" -v -a "$cmd_read_key" -o 512 "$read_key"
+oldcode=$(camcontrol cmd "$disk" -v -a "$cmd_read" -i 512 "i1")
+
+if [ $# = 1 ]
+then
+	printf "%s: %d\\n" "$disk" "$oldcode" 2> /dev/null
+else
+	# idle3 の設定
+	camcontrol cmd "$disk" -v -a "$cmd_write_key" -o 512 "$write_key"
+	camcontrol cmd "$disk" -v -a "$cmd_write" -o 512 "$time"
+
+	# idle3 の確認
+	camcontrol cmd "$disk" -v -a "$cmd_read_key" -o 512 "$read_key"
+	newcode=$(camcontrol cmd "$disk" -v -a "$cmd_read" -i 512 "i1")
+
+	printf "%s: %d -> %d\\n" "$disk" "$oldcode" "$newcode" 2> /dev/null
+	echo "$(basename "$0"): 設定を有効化するために、一度コンピュータの電源を切断、あるいはデバイスの電源を切断して下さい。" >&2
+fi
+
+# VSC の無効化
+camcontrol cmd "$disk" -v -a "$cmd_disable_vsc"
